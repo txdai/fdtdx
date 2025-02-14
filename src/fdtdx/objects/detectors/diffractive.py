@@ -18,7 +18,6 @@ class DiffractiveDetector(Detector):
         frequencies: List of frequencies to analyze (in Hz)
         orders: Tuple of (nx, ny) pairs specifying diffraction orders to compute
         direction: Direction of diffraction analysis ("+" or "-") along propagation axis
-        reduce_volume: If True, reduces measurements to single values per order
     """
     
     frequencies: Sequence[float] = (0.)
@@ -29,7 +28,6 @@ class DiffractiveDetector(Detector):
         on_getattr=[tc.unfreeze],
         on_setattr=[tc.freeze],
     )
-    reduce_volume: bool = True
     dtype: jnp.dtype = tc.field(
         default=jnp.complex64,
         kind="KW_ONLY",
@@ -141,10 +139,7 @@ class DiffractiveDetector(Detector):
         num_freqs = len(self.frequencies)
         num_orders = len(self.orders)
         
-        if self.reduce_volume:
-            shape = (num_freqs, num_orders)
-        else:
-            shape = (num_freqs, num_orders, *self.grid_shape)
+        shape = (num_freqs, num_orders)
             
         # Ensure we're using a complex dtype
         field_dtype = jnp.complex128 if self.dtype == jnp.float64 else jnp.complex64
@@ -249,9 +244,6 @@ class DiffractiveDetector(Detector):
         arr_idx = self._time_step_to_arr_idx[time_step]
         new_state = state.copy()
         
-        if not self.reduce_volume:
-            new_values = new_values.reshape(len(self.frequencies), len(self.orders), *self.grid_shape)
-            
         new_state["diffractive"] = new_state["diffractive"].at[arr_idx].set(new_values)
         
         return new_state 
