@@ -44,8 +44,13 @@ class DiffractiveDetector(Detector):
         # Precompute angular frequencies for vectorization
         self._angular_frequencies = 2 * jnp.pi * jnp.array(self.frequencies)
         
-        # Precompute order indices and wavevectors
-        self._precompute_order_info()
+        # Initialize order info attributes as None
+        self._kx_indices = None
+        self._ky_indices = None
+        self._Nx = None
+        self._Ny = None
+        self._kx_normalized = None
+        self._ky_normalized = None
         
     def _precompute_order_info(self):
         """Precompute order indices and wavevectors for faster processing."""
@@ -97,6 +102,9 @@ class DiffractiveDetector(Detector):
         Raises:
             Exception: If any requested order is not physically realizable
         """
+        if self._Nx is None:
+            raise Exception("Order info not yet computed. Run update first.")
+            
         # Maximum possible orders based on grid
         max_nx = self._Nx // 2
         max_ny = self._Ny // 2
@@ -134,7 +142,17 @@ class DiffractiveDetector(Detector):
         else:
             shape = (num_freqs, num_orders, *self.grid_shape)
             
-        return {"diffractive": jax.ShapeDtypeStruct(shape=shape, dtype=self.dtype)}
+        # Ensure we're using a complex dtype
+        field_dtype = jnp.complex128 if self.dtype == jnp.float64 else jnp.complex64
+        return {"diffractive": jax.ShapeDtypeStruct(shape=shape, dtype=field_dtype)}
+
+    def _num_latent_time_steps(self) -> int:
+        """Get number of time steps needed for latent computation.
+
+        Returns:
+            int: Always returns 1 for diffractive detector since only current state is needed.
+        """
+        return 1
 
     def update(
         self,
@@ -162,6 +180,10 @@ class DiffractiveDetector(Detector):
             DetectorState: Updated state containing new diffractive values
         """
         del inv_permittivity, inv_permeability
+        
+        # Precompute order info if not done yet
+        if self._kx_indices is None:
+            self._precompute_order_info()
         
         # Get current field values at the specified plane using base class's grid_slice
         cur_E = E[:, *self.grid_slice]  # Shape: (3, nx, ny, 1)

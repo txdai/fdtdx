@@ -23,7 +23,7 @@ class PhasorDetector(Detector):
             "Ex", "Ey", "Ez", "Hx", "Hy", "Hz".
     """
 
-    frequencies: Sequence[float]
+    frequencies: Sequence[float] = (None,)
     as_slices: bool = False
     reduce_volume: bool = False
     components: Sequence[Literal["Ex", "Ey", "Ez", "Hx", "Hy", "Hz"]] = frozen_field(
