@@ -10,25 +10,26 @@ from fdtdx.objects.detectors.detector import Detector, DetectorState
 class DiffractiveDetector(Detector):
     """Detector for computing Fourier transforms of fields at specific frequencies and diffraction orders.
     
-    This detector is similar to Tidy3D's DiffractionMonitor, computing field amplitudes for specific
-    diffraction orders and frequencies. It performs spatial and temporal Fourier transforms to analyze
-    the diffracted field coefficients in a specified plane.
+    This detector computes field amplitudes for specific diffraction orders and frequencies through
+    a specified plane in the simulation volume. It can measure diffraction in either positive or negative
+    direction along the propagation axis.
 
     Attributes:
         frequencies: List of frequencies to analyze (in Hz)
         orders: Tuple of (nx, ny) pairs specifying diffraction orders to compute
-        plane: Plane for diffraction analysis ('xy', 'yz', or 'xz')
-        direction: Direction of diffraction analysis ("+" or "-")
-        as_slices: If True, returns results as 2D slices rather than full volume
-        reduce_volume: If True, reduces volume data to single values
+        direction: Direction of diffraction analysis ("+" or "-") along propagation axis
+        reduce_volume: If True, reduces measurements to single values per order
     """
     
     frequencies: Sequence[float] = (0.)
     orders: Sequence[Tuple[int, int]] = ((0, 0))
-    plane: Literal['xy', 'yz', 'xz'] = "xy"
-    direction: Literal["+", "-"] = "+"
-    as_slices: bool = False
-    reduce_volume: bool = False
+    direction: Literal["+", "-"] = tc.field(  # type: ignore
+        init=True,
+        kind="KW_ONLY",
+        on_getattr=[tc.unfreeze],
+        on_setattr=[tc.freeze],
+    )
+    reduce_volume: bool = True
     dtype: jnp.dtype = tc.field(
         default=jnp.complex64,
         kind="KW_ONLY",
@@ -37,9 +38,6 @@ class DiffractiveDetector(Detector):
     def __post_init__(self):
         if self.dtype not in [jnp.complex64, jnp.complex128]:
             raise Exception(f"Invalid dtype in DiffractiveDetector: {self.dtype}")
-        
-        # Set normal axis based on plane
-        self._normal_axis = {'xy': 2, 'yz': 0, 'xz': 1}[self.plane]
         
         # Precompute angular frequencies for vectorization
         self._angular_frequencies = 2 * jnp.pi * jnp.array(self.frequencies)
@@ -52,15 +50,30 @@ class DiffractiveDetector(Detector):
         self._kx_normalized = None
         self._ky_normalized = None
         
+    @property
+    def propagation_axis(self) -> int:
+        """Determines the axis along which diffraction is measured.
+
+        The propagation axis is identified as the dimension with size 1 in the
+        detector's grid shape, representing a plane perpendicular to the diffraction
+        measurement direction.
+
+        Returns:
+            int: Index of the propagation axis (0 for x, 1 for y, 2 for z)
+
+        Raises:
+            Exception: If detector shape does not have exactly one dimension of size 1
+        """
+        if sum([a == 1 for a in self.grid_shape]) != 1:
+            raise Exception(f"Invalid diffractive detector shape: {self.grid_shape}")
+        return self.grid_shape.index(1)
+        
     def _precompute_order_info(self):
         """Precompute order indices and wavevectors for faster processing."""
-        # Get grid dimensions for the plane
-        if self.plane == 'xy':
-            Nx, Ny = self.grid_shape[0], self.grid_shape[1]
-        elif self.plane == 'yz':
-            Nx, Ny = self.grid_shape[1], self.grid_shape[2]
-        else:  # xz plane
-            Nx, Ny = self.grid_shape[0], self.grid_shape[2]
+        # Get grid dimensions for the plane perpendicular to propagation axis
+        prop_axis = self.propagation_axis
+        plane_dims = [i for i in range(3) if i != prop_axis]
+        Nx, Ny = [self.grid_shape[i] for i in plane_dims]
             
         # Convert orders to array for vectorization
         orders = jnp.array(self.orders)  # Shape: (num_orders, 2)
@@ -84,15 +97,6 @@ class DiffractiveDetector(Detector):
         self._kx_normalized = 2 * jnp.pi * orders[:, 0] / (Nx * dx)
         self._ky_normalized = 2 * jnp.pi * orders[:, 1] / (Ny * dy)
         
-    @property
-    def propagation_axis(self) -> int:
-        """Determines the axis normal to the detector plane.
-
-        Returns:
-            int: Index of the normal axis based on the specified plane
-        """
-        return self._normal_axis
-    
     def _validate_orders(self, wavelength: float) -> None:
         """Validate that requested diffraction orders are physically realizable.
         
@@ -190,17 +194,20 @@ class DiffractiveDetector(Detector):
         cur_H = H[:, *self.grid_slice]  # Shape: (3, nx, ny, 1)
         
         # Remove the normal axis dimension since it should be 1
-        cur_E = jnp.squeeze(cur_E, axis=self.propagation_axis + 1)  # Shape: (3, nx, ny)
-        cur_H = jnp.squeeze(cur_H, axis=self.propagation_axis + 1)  # Shape: (3, nx, ny)
+        prop_axis = self.propagation_axis
+        cur_E = jnp.squeeze(cur_E, axis=prop_axis + 1)  # Shape: (3, nx, ny)
+        cur_H = jnp.squeeze(cur_H, axis=prop_axis + 1)  # Shape: (3, nx, ny)
+        
+        # Get plane dimensions for FFT
+        plane_dims = [i for i in range(3) if i != prop_axis]
         
         # Compute FFT of each field component
-        E_k = jnp.fft.fft2(cur_E, axes=(1, 2))  # FFT in spatial dimensions
-        H_k = jnp.fft.fft2(cur_H, axes=(1, 2))
+        E_k = jnp.fft.fft2(cur_E, axes=tuple(d+1 for d in plane_dims))  # FFT in spatial dimensions
+        H_k = jnp.fft.fft2(cur_H, axes=tuple(d+1 for d in plane_dims))
         
         # Compute Poynting vector in k-space for each order
-        # We need to properly account for the cross product in k-space
         dx = dy = self._config.resolution
-        Nx, Ny = self.grid_shape[0], self.grid_shape[1]
+        Nx, Ny = [self.grid_shape[i] for i in plane_dims]
         kx = 2 * jnp.pi * jnp.fft.fftfreq(Nx, dx)
         ky = 2 * jnp.pi * jnp.fft.fftfreq(Ny, dy)
         kx_grid, ky_grid = jnp.meshgrid(kx, ky, indexing='ij')
@@ -223,6 +230,8 @@ class DiffractiveDetector(Detector):
             
             # Compute power in this order
             P_order = jnp.abs(jnp.cross(E_t, jnp.conj(H_t)).sum())
+            if self.direction == "-":
+                P_order = -P_order
             order_amplitudes.append(P_order)
             
         order_amplitudes = jnp.array(order_amplitudes)
