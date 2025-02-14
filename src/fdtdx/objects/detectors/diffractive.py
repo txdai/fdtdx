@@ -193,14 +193,39 @@ class DiffractiveDetector(Detector):
         cur_E = jnp.squeeze(cur_E, axis=self.propagation_axis + 1)  # Shape: (3, nx, ny)
         cur_H = jnp.squeeze(cur_H, axis=self.propagation_axis + 1)  # Shape: (3, nx, ny)
         
-        # Compute total field intensity (|E|^2 + |H|^2) - vectorized
-        field_intensity = jnp.sum(jnp.abs(cur_E)**2 + jnp.abs(cur_H)**2, axis=0)
+        # Compute FFT of each field component
+        E_k = jnp.fft.fft2(cur_E, axes=(1, 2))  # FFT in spatial dimensions
+        H_k = jnp.fft.fft2(cur_H, axes=(1, 2))
         
-        # Compute spatial FFT of the total field
-        spatial_fft = jnp.fft.fft2(field_intensity)
+        # Compute Poynting vector in k-space for each order
+        # We need to properly account for the cross product in k-space
+        dx = dy = self._config.resolution
+        Nx, Ny = self.grid_shape[0], self.grid_shape[1]
+        kx = 2 * jnp.pi * jnp.fft.fftfreq(Nx, dx)
+        ky = 2 * jnp.pi * jnp.fft.fftfreq(Ny, dy)
+        kx_grid, ky_grid = jnp.meshgrid(kx, ky, indexing='ij')
+        k0 = 2 * jnp.pi * self.frequencies[0] / constants.c  # Use first frequency for now
         
-        # Extract all orders at once using advanced indexing
-        order_amplitudes = spatial_fft[self._kx_indices, self._ky_indices]  # Shape: (num_orders,)
+        # For each requested order, compute the diffracted power
+        order_amplitudes = []
+        for kx_idx, ky_idx in zip(self._kx_indices, self._ky_indices):
+            # Get the field components for this k-point
+            E_order = E_k[:, kx_idx, ky_idx]
+            H_order = H_k[:, kx_idx, ky_idx]
+            
+            # Compute kz for propagating waves
+            kz = jnp.sqrt(k0**2 - kx[kx_idx]**2 - ky[ky_idx]**2 + 0j)
+            k_vec = jnp.array([kx[kx_idx], ky[ky_idx], kz])
+            
+            # Project fields to be transverse to k
+            E_t = E_order - jnp.dot(E_order, k_vec) * k_vec / jnp.dot(k_vec, k_vec)
+            H_t = H_order - jnp.dot(H_order, k_vec) * k_vec / jnp.dot(k_vec, k_vec)
+            
+            # Compute power in this order
+            P_order = jnp.abs(jnp.cross(E_t, jnp.conj(H_t)).sum())
+            order_amplitudes.append(P_order)
+            
+        order_amplitudes = jnp.array(order_amplitudes)
         
         # Time domain analysis - vectorized for all frequencies
         t = time_step * self._config.time_step_duration
